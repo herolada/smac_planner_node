@@ -24,6 +24,7 @@
 // as closely as makes sense for a costmap-stack-free node.
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <limits>
@@ -37,6 +38,7 @@
 #include "rclcpp_action/rclcpp_action.hpp"
 
 #include "geometry_msgs/msg/pose_stamped.hpp"
+#include "nav_msgs/msg/occupancy_grid.hpp"
 #include "nav_msgs/msg/path.hpp"
 #include "sensor_msgs/msg/point_cloud2.hpp"
 #include "sensor_msgs/point_cloud2_iterator.hpp"
@@ -88,6 +90,8 @@ public:
       std::bind(&SmacPlannerNode::traversabilityCallback, this, std::placeholders::_1));
 
     _plan_publisher = this->create_publisher<nav_msgs::msg::Path>("plan", 1);
+    _costmap_publisher = this->create_publisher<nav_msgs::msg::OccupancyGrid>(
+      "costmap", rclcpp::QoS(1).transient_local());
 
     _action_server = rclcpp_action::create_server<ComputePathToPose>(
       this, _action_name,
@@ -125,6 +129,11 @@ private:
       declare_parameter<std::string>("traversability_field", "traversability");
     _costmap_resolution = declare_parameter<double>("resolution", 0.1);
     _lethal_threshold = declare_parameter<double>("lethal_threshold", 0.65);
+
+    // How far (metres) a start/goal pose outside the costmap may be from the
+    // nearest in-bounds cell and still be accepted (clamped to that cell).
+    _start_in_bounds_dist = declare_parameter<double>("start_in_bounds_dist", 0.0);
+    _goal_in_bounds_dist = declare_parameter<double>("goal_in_bounds_dist", 0.0);
 
     // Collision checking (circular robot)
     _robot_radius = declare_parameter<double>("robot_radius", 0.3);
@@ -286,9 +295,57 @@ private:
     if (!costmap) {
       return;
     }
+    publishCostmap(*costmap, msg->header.frame_id);
     std::lock_guard<std::mutex> lock(_costmap_mutex);
     _costmap = std::move(costmap);
     _global_frame = msg->header.frame_id;
+  }
+
+  // Maps raw Costmap2D byte values (0-255) to OccupancyGrid's [0, 100] + -1(unknown)
+  // convention, mirroring nav2_costmap_2d::Costmap2DPublisher.
+  static const std::array<int8_t, 256> & costTranslationTable()
+  {
+    static const std::array<int8_t, 256> table = [] {
+      std::array<int8_t, 256> t{};
+      t[0] = 0;  // no obstacle
+      t[nav2_costmap_2d::INSCRIBED_INFLATED_OBSTACLE] = 99;
+      t[nav2_costmap_2d::LETHAL_OBSTACLE] = 100;
+      t[nav2_costmap_2d::NO_INFORMATION] = -1;
+      // Regular cost values scale the range 1 to 252 (inclusive) to 1 to 98 (inclusive).
+      for (int i = 1; i < 253; ++i) {
+        t[i] = static_cast<int8_t>(1 + (97 * (i - 1)) / 251);
+      }
+      return t;
+    } ();
+    return table;
+  }
+
+  void publishCostmap(const nav2_costmap_2d::Costmap2D & costmap, const std::string & frame_id)
+  {
+    if (_costmap_publisher->get_subscription_count() == 0) {
+      return;
+    }
+    nav_msgs::msg::OccupancyGrid grid;
+    grid.header.stamp = now();
+    grid.header.frame_id = frame_id;
+    grid.info.resolution = static_cast<float>(costmap.getResolution());
+    grid.info.width = costmap.getSizeInCellsX();
+    grid.info.height = costmap.getSizeInCellsY();
+
+    double wx, wy;
+    costmap.mapToWorld(0, 0, wx, wy);
+    grid.info.origin.position.x = wx - costmap.getResolution() / 2.0;
+    grid.info.origin.position.y = wy - costmap.getResolution() / 2.0;
+    grid.info.origin.orientation.w = 1.0;
+
+    grid.data.resize(grid.info.width * grid.info.height);
+    const unsigned char * data = costmap.getCharMap();
+    const auto & table = costTranslationTable();
+    std::transform(
+      data, data + grid.data.size(), grid.data.begin(),
+      [&table](unsigned char c) {return table[c];});
+
+    _costmap_publisher->publish(grid);
   }
 
   unsigned char costFromTraversability(float t) const
@@ -497,6 +554,26 @@ private:
     goal_handle->succeed(result);
   }
 
+  // Clamps an out-of-bounds world point (wx, wy) to the nearest valid cell via
+  // worldToMapEnforceBounds, and accepts it only if that cell's center is within
+  // max_dist metres of the original point. On success, mx/my are set to the clamped cell.
+  bool enforceBoundsWithinTolerance(
+    const nav2_costmap_2d::Costmap2D & costmap,
+    double wx, double wy, double max_dist,
+    float & mx, float & my) const
+  {
+    int imx, imy;
+    costmap.worldToMapEnforceBounds(wx, wy, imx, imy);
+    double cwx, cwy;
+    costmap.mapToWorld(static_cast<unsigned int>(imx), static_cast<unsigned int>(imy), cwx, cwy);
+    if (std::hypot(cwx - wx, cwy - wy) > max_dist) {
+      return false;
+    }
+    mx = static_cast<float>(imx);
+    my = static_cast<float>(imy);
+    return true;
+  }
+
   // ----------------------------------------------------------------------- //
   // Planning core (mirrors SmacPlannerHybrid::createPlan)
   // ----------------------------------------------------------------------- //
@@ -525,9 +602,14 @@ private:
     if (!costmap->worldToMapContinuous(
         start.pose.position.x, start.pose.position.y, mx_start, my_start))
     {
-      error_code = ComputePathToPose::Result::START_OUTSIDE_MAP;
-      error_msg = "Start outside costmap bounds";
-      return false;
+      if (!enforceBoundsWithinTolerance(
+          *costmap, start.pose.position.x, start.pose.position.y,
+          _start_in_bounds_dist, mx_start, my_start))
+      {
+        error_code = ComputePathToPose::Result::START_OUTSIDE_MAP;
+        error_msg = "Start outside costmap bounds (beyond start_in_bounds_dist)";
+        return false;
+      }
     }
     unsigned int start_bin = orientationToBin(tf2::getYaw(start.pose.orientation));
     _a_star->setStart(mx_start, my_start, start_bin);
@@ -536,9 +618,14 @@ private:
     if (!costmap->worldToMapContinuous(
         goal.pose.position.x, goal.pose.position.y, mx_goal, my_goal))
     {
-      error_code = ComputePathToPose::Result::GOAL_OUTSIDE_MAP;
-      error_msg = "Goal outside costmap bounds";
-      return false;
+      if (!enforceBoundsWithinTolerance(
+          *costmap, goal.pose.position.x, goal.pose.position.y,
+          _goal_in_bounds_dist, mx_goal, my_goal))
+      {
+        error_code = ComputePathToPose::Result::GOAL_OUTSIDE_MAP;
+        error_msg = "Goal outside costmap bounds (beyond goal_in_bounds_dist)";
+        return false;
+      }
     }
     unsigned int goal_bin = orientationToBin(tf2::getYaw(goal.pose.orientation));
     _a_star->setGoal(mx_goal, my_goal, goal_bin, _goal_heading_mode, _coarse_search_resolution);
@@ -566,6 +653,7 @@ private:
     int num_iterations = 0;
     const float tolerance = _tolerance / static_cast<float>(costmap->getResolution());
     if (!_a_star->createPath(path, num_iterations, tolerance, cancel_checker, nullptr)) {
+      RCLCPP_INFO(get_logger(), "astar num_iterations %d", num_iterations);
       if (num_iterations == 1) {
         error_code = ComputePathToPose::Result::START_OCCUPIED;
         error_msg = "Start occupied";
@@ -659,6 +747,7 @@ private:
   // ROS interfaces
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr _traversability_sub;
   rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr _plan_publisher;
+  rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr _costmap_publisher;
   rclcpp_action::Server<ComputePathToPose>::SharedPtr _action_server;
   std::shared_ptr<tf2_ros::Buffer> _tf_buffer;
   std::shared_ptr<tf2_ros::TransformListener> _tf_listener;
@@ -681,6 +770,8 @@ private:
   double _transform_tolerance;
   double _costmap_resolution;
   double _lethal_threshold;
+  double _start_in_bounds_dist;
+  double _goal_in_bounds_dist;
   double _robot_radius;
   float _tolerance;
   bool _allow_unknown;
