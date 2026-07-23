@@ -1,21 +1,23 @@
 smac_planner_node:
   ros__parameters:
     # Interfaces / frames
-    traversability_topic: "traversability"
+    traversability_topic: "/terrain_map"
     action_name: "compute_path_to_pose"
     robot_base_frame: "base_link"
     transform_tolerance: 0.1
 
     # Costmap built from the traversability point cloud
     traversability_field: "traversability"   # PointCloud2 field name (float, 0..1)
-    resolution: 0.1                            # m/cell; must match the grid spacing
-    lethal_threshold: 0.65                     # traversability >= this -> lethal obstacle
+    resolution: 0.15                            # m/cell; must match the grid spacing
+    lethal_threshold: 0.99                     # traversability >= this -> lethal obstacle
 
     # Collision checking (circular robot)
     robot_radius: 0.3
 
     # Hybrid-A* search (mirrors nav2_smac_planner SmacPlannerHybrid defaults)
-    tolerance: 0.25
+    tolerance: 2.0
+    start_in_bounds_dist: 4.0
+    goal_in_bounds_dist: 4.0
     allow_unknown: true
     max_iterations: 1000000
     max_on_approach_iterations: 1000

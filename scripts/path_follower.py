@@ -46,7 +46,7 @@ from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 
 import tf2_ros
-from geometry_msgs.msg import Twist
+from geometry_msgs.msg import TwistStamped
 from nav2_msgs.action import FollowPath
 from nav_msgs.msg import Path
 
@@ -89,7 +89,7 @@ class PathFollower(Node):
         self._base_frame = self.declare_parameter('base_frame', 'base_link').value
         self._cmd_topic = self.declare_parameter('cmd_vel_topic', 'cmd_vel').value
         # 'topic' -> subscribe to plan_topic; 'action' -> serve FollowPath.
-        self._input_mode = self.declare_parameter('input_mode', 'topic').value
+        self._input_mode = self.declare_parameter('input_mode', 'action').value
         self._plan_topic = self.declare_parameter('plan_topic', 'plan').value
         self._action_name = self.declare_parameter('action_name', 'follow_path').value
         # How long TF may fail continuously before a goal is aborted (action mode).
@@ -109,7 +109,7 @@ class PathFollower(Node):
         self._tf_buffer = tf2_ros.Buffer()
         self._tf_listener = tf2_ros.TransformListener(self._tf_buffer, self)
 
-        self._cmd_pub = self.create_publisher(Twist, self._cmd_topic, 1)
+        self._cmd_pub = self.create_publisher(TwistStamped, self._cmd_topic, 1)
 
         if self._input_mode == 'topic':
             self._setup_topic_mode()
@@ -204,12 +204,12 @@ class PathFollower(Node):
         return target.pose.position.x, target.pose.position.y, dist_to_goal
 
     def _compute_command(self, path, pose):
-        """Run one PID step. Returns (Twist, distance_to_goal, goal_reached)."""
+        """Run one PID step. Returns (TwistStamped, distance_to_goal, goal_reached)."""
         rx, ry, ryaw = pose
         px, py, dist_to_goal = self._find_lookahead(path, rx, ry)
 
         if dist_to_goal <= self._goal_tolerance:
-            return Twist(), dist_to_goal, True
+            return TwistStamped(), dist_to_goal, True
 
         # Heading error toward the lookahead point, in the robot frame.
         desired_yaw = math.atan2(py - ry, px - rx)
@@ -239,17 +239,19 @@ class PathFollower(Node):
         linear = min(linear, self._max_linear * (dist_to_goal / self._lookahead))
         linear = max(0.0, min(self._max_linear, linear))
 
-        cmd = Twist()
-        cmd.linear.x = linear
-        cmd.angular.z = angular
+        cmd = TwistStamped()
+        cmd.header.frame_id = "base_link"
+        cmd.header.stamp = self.get_clock().now().to_msg()
+        cmd.twist.linear.x = linear
+        cmd.twist.angular.z = angular
         return cmd, dist_to_goal, False
 
     def _publish_cmd(self, cmd):
-        self._current_speed = cmd.linear.x
+        self._current_speed = cmd.twist.linear.x
         self._cmd_pub.publish(cmd)
 
     def _publish_stop(self):
-        self._publish_cmd(Twist())
+        self._publish_cmd(TwistStamped())
 
     # -- topic mode --------------------------------------------------------
     def _on_path(self, msg: Path):
