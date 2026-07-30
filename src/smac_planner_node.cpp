@@ -59,6 +59,7 @@
 #include "nav2_smac_planner/constants.hpp"
 #include "nav2_smac_planner/types.hpp"
 #include "nav2_smac_planner/utils.hpp"
+#include "nav2_core/planner_exceptions.hpp"
 
 namespace smac_planner_node
 {
@@ -649,38 +650,52 @@ private:
     }
 
     // Compute plan.
-    nav2_smac_planner::NodeHybrid::CoordinateVector path;
-    int num_iterations = 0;
-    const float tolerance = _tolerance / static_cast<float>(costmap->getResolution());
-    if (!_a_star->createPath(path, num_iterations, tolerance, cancel_checker, nullptr)) {
-      RCLCPP_INFO(get_logger(), "astar num_iterations %d", num_iterations);
-      if (num_iterations == 1) {
-        error_code = ComputePathToPose::Result::START_OCCUPIED;
-        error_msg = "Start occupied";
-      } else if (num_iterations < _a_star->getMaxIterations()) {
-        error_code = ComputePathToPose::Result::NO_VALID_PATH;
-        error_msg = "No valid path could be found";
-      } else {
-        error_code = ComputePathToPose::Result::TIMEOUT;
-        error_msg = "Exceeded maximum iterations";
+    // nav2_smac_planner throws nav2_core::PlannerException (and occasionally plain
+    // std::runtime_error) from deep inside createPath()/smooth() for cases like a goal
+    // in lethal cost or a mid-search cancellation, relying on the Nav2 planner server to
+    // catch them. We have no such server, and this all runs on a detached std::thread, so
+    // an uncaught exception here would call std::terminate() and kill the whole node.
+    // Catch it, log it, and just hand back an empty path instead.
+    try {
+      nav2_smac_planner::NodeHybrid::CoordinateVector path;
+      int num_iterations = 0;
+      const float tolerance = _tolerance / static_cast<float>(costmap->getResolution());
+      if (!_a_star->createPath(path, num_iterations, tolerance, cancel_checker, nullptr)) {
+        RCLCPP_INFO(get_logger(), "astar num_iterations %d", num_iterations);
+        if (num_iterations == 1) {
+          error_code = ComputePathToPose::Result::START_OCCUPIED;
+          error_msg = "Start occupied";
+        } else if (num_iterations < _a_star->getMaxIterations()) {
+          error_code = ComputePathToPose::Result::NO_VALID_PATH;
+          error_msg = "No valid path could be found";
+        } else {
+          error_code = ComputePathToPose::Result::TIMEOUT;
+          error_msg = "Exceeded maximum iterations";
+        }
+        return false;
       }
-      return false;
-    }
 
-    // Convert to world coordinates (backtrace yields goal-to-start order).
-    plan.poses.reserve(path.size());
-    for (int i = static_cast<int>(path.size()) - 1; i >= 0; --i) {
-      pose.pose = nav2_smac_planner::getWorldCoords(path[i].x, path[i].y, costmap.get());
-      pose.pose.orientation = nav2_smac_planner::getWorldOrientation(path[i].theta);
-      plan.poses.push_back(pose);
-    }
+      // Convert to world coordinates (backtrace yields goal-to-start order).
+      plan.poses.reserve(path.size());
+      for (int i = static_cast<int>(path.size()) - 1; i >= 0; --i) {
+        pose.pose = nav2_smac_planner::getWorldCoords(path[i].x, path[i].y, costmap.get());
+        pose.pose.orientation = nav2_smac_planner::getWorldOrientation(path[i].theta);
+        plan.poses.push_back(pose);
+      }
 
-    // Smooth, with whatever time is left.
-    if (_smoother && num_iterations > 1) {
-      const auto elapsed = std::chrono::duration<double>(
-        std::chrono::steady_clock::now() - _plan_start).count();
-      double time_remaining = _max_planning_time - elapsed;
-      _smoother->smooth(plan, costmap.get(), time_remaining);
+      // Smooth, with whatever time is left.
+      if (_smoother && num_iterations > 1) {
+        const auto elapsed = std::chrono::duration<double>(
+          std::chrono::steady_clock::now() - _plan_start).count();
+        double time_remaining = _max_planning_time - elapsed;
+        _smoother->smooth(plan, costmap.get(), time_remaining);
+      }
+    } catch (const std::exception & ex) {
+      RCLCPP_WARN(
+        get_logger(), "Planner threw an exception, returning an empty path: %s", ex.what());
+      plan.poses.clear();
+      error_code = ComputePathToPose::Result::NONE;
+      error_msg.clear();
     }
 
     return true;
