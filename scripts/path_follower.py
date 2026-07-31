@@ -46,7 +46,8 @@ from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 
 import tf2_ros
-from geometry_msgs.msg import TwistStamped
+import tf2_geometry_msgs  # noqa: F401 - registers PoseStamped transform support on tf_buffer
+from geometry_msgs.msg import PoseStamped, TwistStamped
 from nav2_msgs.action import FollowPath
 from nav_msgs.msg import Path
 
@@ -77,8 +78,8 @@ class PathFollower(Node):
 
         # --- Parameters ---------------------------------------------------
         self._control_hz = self.declare_parameter('control_frequency', 20.0).value
-        self._lookahead = self.declare_parameter('lookahead_distance', 0.6).value
-        self._max_linear = self.declare_parameter('max_linear_velocity', 1.0).value
+        self._lookahead = self.declare_parameter('lookahead_distance', 1.0).value
+        self._max_linear = self.declare_parameter('max_linear_velocity', 0.6).value
         self._max_angular = self.declare_parameter('max_angular_velocity', 1.5).value
         self._goal_tolerance = self.declare_parameter('goal_tolerance', 0.15).value
         # PID gains acting on the heading error to the lookahead point.
@@ -86,8 +87,12 @@ class PathFollower(Node):
         self._ki = self.declare_parameter('ki', 0.0).value
         self._kd = self.declare_parameter('kd', 0.1).value
         # Frame the robot's base lives in (TF lookup target).
-        self._base_frame = self.declare_parameter('base_frame', 'base_link').value
+        self._base_frame = self.declare_parameter('base_frame', 'odin1_base_link').value
+        # Fixed frame every incoming path is transformed into on arrival, so the
+        # robot's progress along it can be tracked as it moves.
+        self._map_frame = self.declare_parameter('map_frame', 'map').value
         self._cmd_topic = self.declare_parameter('cmd_vel_topic', 'cmd_vel').value
+        self._lookahead_topic = self.declare_parameter('lookahead_topic', 'lookahead_pose').value
         # 'topic' -> subscribe to plan_topic; 'action' -> serve FollowPath.
         self._input_mode = self.declare_parameter('input_mode', 'action').value
         self._plan_topic = self.declare_parameter('plan_topic', 'plan').value
@@ -110,6 +115,7 @@ class PathFollower(Node):
         self._tf_listener = tf2_ros.TransformListener(self._tf_buffer, self)
 
         self._cmd_pub = self.create_publisher(TwistStamped, self._cmd_topic, 1)
+        self._lookahead_pub = self.create_publisher(PoseStamped, self._lookahead_topic, 1)
 
         if self._input_mode == 'topic':
             self._setup_topic_mode()
@@ -172,6 +178,36 @@ class PathFollower(Node):
         t = tf.transform.translation
         return (t.x, t.y, yaw_from_quaternion(tf.transform.rotation))
 
+    def _transform_path(self, path):
+        """Transform ``path`` into ``self._map_frame`` once, up front.
+
+        A single TF lookup is applied to every pose rather than re-resolving the
+        path's frame on every control cycle, since the path is otherwise static
+        data: if it arrived in a moving frame (e.g. ``base_link``), comparing a
+        live robot pose against it every cycle would never show any progress.
+        """
+        if not path.poses:
+            return path
+        source_frame = path.header.frame_id
+        if source_frame == self._map_frame:
+            return path
+        try:
+            tf = self._tf_buffer.lookup_transform(
+                self._map_frame, source_frame, rclpy.time.Time(),
+                timeout=Duration(seconds=0.2))
+        except tf2_ros.TransformException as ex:
+            raise InvalidPath(
+                f"Could not transform path from '{source_frame}' to "
+                f"'{self._map_frame}': {ex}")
+
+        new_path = Path()
+        new_path.header.stamp = path.header.stamp
+        new_path.header.frame_id = self._map_frame
+        new_path.poses = [
+            tf2_geometry_msgs.do_transform_pose_stamped(ps, tf) for ps in path.poses
+        ]
+        return new_path
+
     def _find_lookahead(self, path, rx, ry):
         """Pick a point ~lookahead distance ahead along ``path`` from (rx, ry).
 
@@ -207,6 +243,7 @@ class PathFollower(Node):
         """Run one PID step. Returns (TwistStamped, distance_to_goal, goal_reached)."""
         rx, ry, ryaw = pose
         px, py, dist_to_goal = self._find_lookahead(path, rx, ry)
+        self._publish_lookahead(path.header.frame_id, px, py)
 
         if dist_to_goal <= self._goal_tolerance:
             return TwistStamped(), dist_to_goal, True
@@ -253,13 +290,27 @@ class PathFollower(Node):
     def _publish_stop(self):
         self._publish_cmd(TwistStamped())
 
+    def _publish_lookahead(self, frame_id, x, y):
+        pose = PoseStamped()
+        pose.header.frame_id = frame_id
+        pose.header.stamp = self.get_clock().now().to_msg()
+        pose.pose.position.x = x
+        pose.pose.position.y = y
+        pose.pose.orientation.w = 1.0
+        self._lookahead_pub.publish(pose)
+
     # -- topic mode --------------------------------------------------------
     def _on_path(self, msg: Path):
         if not msg.poses:
             self.get_logger().warning('Received empty path; stopping.')
             self._path = None
             return
-        self._path = msg
+        try:
+            self._path = self._transform_path(msg)
+        except InvalidPath as ex:
+            self.get_logger().error(str(ex))
+            self._path = None
+            return
         self._reset_pid()
 
     def _timer_step(self):
@@ -320,6 +371,7 @@ class PathFollower(Node):
         try:
             if not path.poses:
                 raise InvalidPath('Received goal with empty path.')
+            path = self._transform_path(path)
 
             while rclpy.ok():
                 cycle_start = time.monotonic()
