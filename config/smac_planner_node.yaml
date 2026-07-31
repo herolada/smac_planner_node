@@ -3,13 +3,22 @@ smac_planner_node:
     # Interfaces / frames
     traversability_topic: "/terrain_map"
     action_name: "compute_path_to_pose"
-    robot_base_frame: "base_link"
+    robot_base_frame: "odin1_base_link"
     transform_tolerance: 0.1
 
     # Costmap built from the traversability point cloud
     traversability_field: "traversability"   # PointCloud2 field name (float, 0..1)
     resolution: 0.15                            # m/cell; must match the grid spacing
-    lethal_threshold: 0.99                     # traversability >= this -> lethal obstacle
+    lethal_threshold: 0.9                     # traversability >= this -> lethal obstacle
+
+    # Minimum robot-centered costmap rectangle (metres). The costmap is always sized
+    # dynamically to enclose the incoming cloud's XY extent; if costmap_width/height are
+    # both > 0, the bounds are additionally expanded (never shrunk) to enclose this
+    # rectangle, so the costmap never gets smaller than it even with a sparse/narrow cloud.
+    costmap_width: 12.0
+    costmap_height: 6.0
+    costmap_center_x: 5.4                      # offset ahead (+) of the robot, robot frame
+    costmap_center_y: 0.0                      # offset left (+) of the robot, robot frame
 
     # Collision checking (circular robot)
     robot_radius: 0.3

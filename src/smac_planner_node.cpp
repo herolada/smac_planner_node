@@ -131,6 +131,15 @@ private:
     _costmap_resolution = declare_parameter<double>("resolution", 0.1);
     _lethal_threshold = declare_parameter<double>("lethal_threshold", 0.65);
 
+    // Minimum robot-centered costmap rectangle. The costmap is always dynamically sized
+    // to enclose the incoming cloud's XY extent, but if costmap_width/height are both > 0
+    // the bounds are expanded (never shrunk) to also enclose this rectangle, so the
+    // costmap never gets smaller than it even if the cloud is sparse/narrow.
+    _costmap_width = declare_parameter<double>("costmap_width", 0.0);
+    _costmap_height = declare_parameter<double>("costmap_height", 0.0);
+    _costmap_center_x = declare_parameter<double>("costmap_center_x", 0.0);
+    _costmap_center_y = declare_parameter<double>("costmap_center_y", 0.0);
+
     // How far (metres) a start/goal pose outside the costmap may be from the
     // nearest in-bounds cell and still be accepted (clamped to that cell).
     _start_in_bounds_dist = declare_parameter<double>("start_in_bounds_dist", 0.0);
@@ -411,6 +420,30 @@ private:
       return nullptr;
     }
 
+    // Expand the bounds to enclose a minimum robot-centered rectangle, if configured
+    // (costmap_width/height <= 0 disables this and leaves the cloud-only bounds above).
+    if (_costmap_width > 0.0 && _costmap_height > 0.0) {
+      geometry_msgs::msg::PoseStamped robot_pose;
+      if (!getRobotPose(cloud.header.frame_id, robot_pose)) {
+        RCLCPP_WARN_THROTTLE(
+          get_logger(), *get_clock(), 5000,
+          "Could not look up robot pose in '%s' for minimum costmap size; skipping update.",
+          cloud.header.frame_id.c_str());
+        return nullptr;
+      }
+      // costmap_center_x/y are offsets in the robot's own frame (e.g. positive x shifts
+      // the minimum rectangle ahead of the robot), rotated into the cloud's (global) frame.
+      const double yaw = tf2::getYaw(robot_pose.pose.orientation);
+      const double center_x = robot_pose.pose.position.x +
+        std::cos(yaw) * _costmap_center_x - std::sin(yaw) * _costmap_center_y;
+      const double center_y = robot_pose.pose.position.y +
+        std::sin(yaw) * _costmap_center_x + std::cos(yaw) * _costmap_center_y;
+      min_x = std::min(min_x, center_x - _costmap_width / 2.0);
+      max_x = std::max(max_x, center_x + _costmap_width / 2.0);
+      min_y = std::min(min_y, center_y - _costmap_height / 2.0);
+      max_y = std::max(max_y, center_y + _costmap_height / 2.0);
+    }
+
     const double res = _costmap_resolution;
     const unsigned int size_x =
       static_cast<unsigned int>(std::lround((max_x - min_x) / res)) + 1u;
@@ -434,16 +467,11 @@ private:
       if (!std::isfinite(x) || !std::isfinite(y)) {
         continue;
       }
-      const int mx = static_cast<int>(std::lround((x - min_x) / res));
-      const int my = static_cast<int>(std::lround((y - min_y) / res));
-      if (mx < 0 || my < 0 ||
-        mx >= static_cast<int>(size_x) || my >= static_cast<int>(size_y))
-      {
+      unsigned int mx, my;
+      if (!costmap->worldToMap(static_cast<double>(x), static_cast<double>(y), mx, my)) {
         continue;
       }
-      costmap->setCost(
-        static_cast<unsigned int>(mx), static_cast<unsigned int>(my),
-        costFromTraversability(*pt));
+      costmap->setCost(mx, my, costFromTraversability(*pt));
     }
 
     return costmap;
@@ -785,6 +813,10 @@ private:
   double _transform_tolerance;
   double _costmap_resolution;
   double _lethal_threshold;
+  double _costmap_width;
+  double _costmap_height;
+  double _costmap_center_x;
+  double _costmap_center_y;
   double _start_in_bounds_dist;
   double _goal_in_bounds_dist;
   double _robot_radius;
