@@ -79,7 +79,7 @@ class PathFollower(Node):
         # --- Parameters ---------------------------------------------------
         self._control_hz = self.declare_parameter('control_frequency', 20.0).value
         self._lookahead = self.declare_parameter('lookahead_distance', 1.0).value
-        self._max_linear = self.declare_parameter('max_linear_velocity', 0.6).value
+        self._max_linear = self.declare_parameter('max_linear_velocity', 1.0).value
         self._max_angular = self.declare_parameter('max_angular_velocity', 1.5).value
         self._goal_tolerance = self.declare_parameter('goal_tolerance', 0.15).value
         # PID gains acting on the heading error to the lookahead point.
@@ -87,10 +87,10 @@ class PathFollower(Node):
         self._ki = self.declare_parameter('ki', 0.0).value
         self._kd = self.declare_parameter('kd', 0.1).value
         # Frame the robot's base lives in (TF lookup target).
-        self._base_frame = self.declare_parameter('base_frame', 'odin1_base_link').value
+        self._base_frame = self.declare_parameter('base_frame', 'base_link').value
         # Fixed frame every incoming path is transformed into on arrival, so the
         # robot's progress along it can be tracked as it moves.
-        self._map_frame = self.declare_parameter('map_frame', 'map').value
+        self._map_frame = self.declare_parameter('map_frame', 'odom_odin').value
         self._cmd_topic = self.declare_parameter('cmd_vel_topic', 'cmd_vel').value
         self._lookahead_topic = self.declare_parameter('lookahead_topic', 'lookahead_pose').value
         # 'topic' -> subscribe to plan_topic; 'action' -> serve FollowPath.

@@ -3,7 +3,7 @@ smac_planner_node:
     # Interfaces / frames
     traversability_topic: "/terrain_map"
     action_name: "compute_path_to_pose"
-    robot_base_frame: "odin1_base_link"
+    robot_base_frame: "base_link"
     transform_tolerance: 0.1
 
     # Costmap built from the traversability point cloud

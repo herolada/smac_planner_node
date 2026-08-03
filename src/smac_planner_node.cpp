@@ -140,6 +140,11 @@ private:
     _costmap_center_x = declare_parameter<double>("costmap_center_x", 0.0);
     _costmap_center_y = declare_parameter<double>("costmap_center_y", 0.0);
 
+    // Extra margin (metres) added on every side after the above bounds are computed, so
+    // the outermost cloud points/minimum rectangle aren't flush with the costmap edge.
+    _costmap_margin_x = declare_parameter<double>("costmap_margin_x", 1.0);
+    _costmap_margin_y = declare_parameter<double>("costmap_margin_y", 1.0);
+
     // How far (metres) a start/goal pose outside the costmap may be from the
     // nearest in-bounds cell and still be accepted (clamped to that cell).
     _start_in_bounds_dist = declare_parameter<double>("start_in_bounds_dist", 0.0);
@@ -443,6 +448,12 @@ private:
       min_y = std::min(min_y, center_y - _costmap_height / 2.0);
       max_y = std::max(max_y, center_y + _costmap_height / 2.0);
     }
+
+    // Pad every side so the outermost points/rectangle aren't flush with the costmap edge.
+    min_x -= _costmap_margin_x;
+    max_x += _costmap_margin_x;
+    min_y -= _costmap_margin_y;
+    max_y += _costmap_margin_y;
 
     const double res = _costmap_resolution;
     const unsigned int size_x =
@@ -817,6 +828,8 @@ private:
   double _costmap_height;
   double _costmap_center_x;
   double _costmap_center_y;
+  double _costmap_margin_x;
+  double _costmap_margin_y;
   double _start_in_bounds_dist;
   double _goal_in_bounds_dist;
   double _robot_radius;
