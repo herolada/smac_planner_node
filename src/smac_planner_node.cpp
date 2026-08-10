@@ -142,8 +142,13 @@ private:
 
     // Extra margin (metres) added on every side after the above bounds are computed, so
     // the outermost cloud points/minimum rectangle aren't flush with the costmap edge.
-    _costmap_margin_x = declare_parameter<double>("costmap_margin_x", 1.0);
-    _costmap_margin_y = declare_parameter<double>("costmap_margin_y", 1.0);
+    _costmap_margin_x = declare_parameter<double>("costmap_margin_x", 0.0);
+    _costmap_margin_y = declare_parameter<double>("costmap_margin_y", 0.0);
+
+    // Maximum XY distance (metres) from the robot for a cloud point to be included in the
+    // costmap at all; farther points are dropped before bounds/cost computation. <= 0 disables
+    // this filter (all finite points are considered, as before).
+    _trav_max_dist = declare_parameter<double>("trav_max_dist", 0.0);
 
     // How far (metres) a start/goal pose outside the costmap may be from the
     // nearest in-bounds cell and still be accepted (clamped to that cell).
@@ -401,7 +406,22 @@ private:
       return nullptr;
     }
 
-    // First pass: XY bounds of valid points.
+    // If limiting cloud points by distance from the robot, or enclosing a minimum
+    // robot-centered rectangle, the robot's pose in the cloud's frame is needed up front.
+    const bool need_robot_pose = _trav_max_dist > 0.0 ||
+      (_costmap_width > 0.0 && _costmap_height > 0.0);
+    geometry_msgs::msg::PoseStamped robot_pose;
+    if (need_robot_pose && !getRobotPose(cloud.header.frame_id, robot_pose)) {
+      RCLCPP_WARN_THROTTLE(
+        get_logger(), *get_clock(), 5000,
+        "Could not look up robot pose in '%s'; skipping costmap update.",
+        cloud.header.frame_id.c_str());
+      return nullptr;
+    }
+    const double robot_x = robot_pose.pose.position.x;
+    const double robot_y = robot_pose.pose.position.y;
+
+    // First pass: XY bounds of valid (and, if trav_max_dist > 0, in-range) points.
     sensor_msgs::PointCloud2ConstIterator<float> it_x(cloud, "x");
     sensor_msgs::PointCloud2ConstIterator<float> it_y(cloud, "y");
     double min_x = std::numeric_limits<double>::max();
@@ -413,6 +433,9 @@ private:
       const float x = *it_x;
       const float y = *it_y;
       if (!std::isfinite(x) || !std::isfinite(y)) {
+        continue;
+      }
+      if (_trav_max_dist > 0.0 && std::hypot(x - robot_x, y - robot_y) > _trav_max_dist) {
         continue;
       }
       min_x = std::min(min_x, static_cast<double>(x));
@@ -428,14 +451,6 @@ private:
     // Expand the bounds to enclose a minimum robot-centered rectangle, if configured
     // (costmap_width/height <= 0 disables this and leaves the cloud-only bounds above).
     if (_costmap_width > 0.0 && _costmap_height > 0.0) {
-      geometry_msgs::msg::PoseStamped robot_pose;
-      if (!getRobotPose(cloud.header.frame_id, robot_pose)) {
-        RCLCPP_WARN_THROTTLE(
-          get_logger(), *get_clock(), 5000,
-          "Could not look up robot pose in '%s' for minimum costmap size; skipping update.",
-          cloud.header.frame_id.c_str());
-        return nullptr;
-      }
       // costmap_center_x/y are offsets in the robot's own frame (e.g. positive x shifts
       // the minimum rectangle ahead of the robot), rotated into the cloud's (global) frame.
       const double yaw = tf2::getYaw(robot_pose.pose.orientation);
@@ -476,6 +491,9 @@ private:
       const float x = *px;
       const float y = *py;
       if (!std::isfinite(x) || !std::isfinite(y)) {
+        continue;
+      }
+      if (_trav_max_dist > 0.0 && std::hypot(x - robot_x, y - robot_y) > _trav_max_dist) {
         continue;
       }
       unsigned int mx, my;
@@ -830,6 +848,7 @@ private:
   double _costmap_center_y;
   double _costmap_margin_x;
   double _costmap_margin_y;
+  double _trav_max_dist;
   double _start_in_bounds_dist;
   double _goal_in_bounds_dist;
   double _robot_radius;

@@ -19,7 +19,8 @@ smac_planner_node:
     costmap_height: 6.0
     costmap_center_x: 5.4                      # offset ahead (+) of the robot, robot frame
     costmap_center_y: 0.0                      # offset left (+) of the robot, robot frame
-
+    trav_max_dist: 0.0                         # m; drop cloud points farther than this from the robot (<=0 disables), only use this if you need to ensure, that the incoming terrain_map is bounded
+    
     # Collision checking (circular robot)
     robot_radius: 0.3
 
