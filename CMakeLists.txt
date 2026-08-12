@@ -52,6 +52,7 @@ install(TARGETS smac_planner_node
 install(PROGRAMS
   scripts/rviz_goal_relay.py
   scripts/path_follower.py
+  scripts/path_follower_dynamic.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
