@@ -105,6 +105,19 @@ class PathFollowerDynamic(Node):
         self._max_linear_velocity = self.declare_parameter('max_linear_velocity', 1.0).value
         self._min_linear_velocity = self.declare_parameter('min_linear_velocity', 0.1).value
         self._max_angular = self.declare_parameter('max_angular_velocity', 1.5).value
+        # Slew-rate limits: bound how fast the *commanded* velocity may change
+        # between control cycles, independent of what the PID/curvature logic
+        # would otherwise ask for. Decel defaults higher than accel since
+        # braking is typically faster than accelerating.
+        self._max_linear_accel = self.declare_parameter('max_linear_accel', 0.3).value
+        self._max_linear_decel = self.declare_parameter('max_linear_decel', 0.7).value
+        self._max_angular_accel = self.declare_parameter('max_angular_accel', 2.0).value
+        # Off by default (matches prior behaviour): safety stops (TF loss,
+        # cancel, preempt-abort, goal reached) publish zero immediately. When
+        # on, _publish_stop ramps down at max_linear_decel/max_angular_accel
+        # instead, same as a normal commanded stop.
+        self._safety_stop_respects_decel = self.declare_parameter(
+            'safety_stop_respects_decel', True).value
         self._goal_tolerance = self.declare_parameter('goal_tolerance', 0.15).value
         # PID gains acting on the heading error to the lookahead point.
         self._kp = self.declare_parameter('kp', 1.5).value
@@ -127,6 +140,10 @@ class PathFollowerDynamic(Node):
             'max_linear_velocity': '_max_linear_velocity',
             'min_linear_velocity': '_min_linear_velocity',
             'max_angular_velocity': '_max_angular',
+            'max_linear_accel': '_max_linear_accel',
+            'max_linear_decel': '_max_linear_decel',
+            'max_angular_accel': '_max_angular_accel',
+            'safety_stop_respects_decel': '_safety_stop_respects_decel',
             'goal_tolerance': '_goal_tolerance',
             'kp': '_kp',
             'ki': '_ki',
@@ -146,6 +163,7 @@ class PathFollowerDynamic(Node):
         self._prev_error = None      # PID previous error
         self._prev_time = None       # timestamp of previous tick
         self._current_speed = 0.0    # last commanded linear velocity (feedback)
+        self._current_angular = 0.0  # last commanded angular velocity (feedback)
 
         # --- TF -----------------------------------------------------------
         self._tf_buffer = tf2_ros.Buffer()
@@ -204,6 +222,12 @@ class PathFollowerDynamic(Node):
         if value('max_angular_velocity', self._max_angular) <= 0.0:
             return SetParametersResult(
                 successful=False, reason='max_angular_velocity must be > 0.')
+        if value('max_linear_accel', self._max_linear_accel) <= 0.0:
+            return SetParametersResult(successful=False, reason='max_linear_accel must be > 0.')
+        if value('max_linear_decel', self._max_linear_decel) <= 0.0:
+            return SetParametersResult(successful=False, reason='max_linear_decel must be > 0.')
+        if value('max_angular_accel', self._max_angular_accel) <= 0.0:
+            return SetParametersResult(successful=False, reason='max_angular_accel must be > 0.')
         if value('goal_tolerance', self._goal_tolerance) < 0.0:
             return SetParametersResult(successful=False, reason='goal_tolerance must be >= 0.')
         if value('curvature_lookahead_distance', self._curvature_lookahead_distance) <= 0.0:
@@ -392,6 +416,18 @@ class PathFollowerDynamic(Node):
         avg_curvature = total_turn / arc_len  # rad/m
         return max(0.0, min(1.0, avg_curvature / self._max_curvature))
 
+    @staticmethod
+    def _slew_limit(desired, current, accel, decel, dt):
+        """Clamp a single-cycle change in a velocity component.
+
+        ``accel`` bounds the change when |desired| grows past |current|,
+        ``decel`` when it shrinks back toward (or through) zero -- kept as
+        separate limits since braking is typically faster than accelerating.
+        """
+        max_delta = (accel if abs(desired) > abs(current) else decel) * dt
+        delta = max(-max_delta, min(max_delta, desired - current))
+        return current + delta
+
     def _compute_command(self, path, pose):
         """Run one PID step. Returns (TwistStamped, distance_to_goal, goal_reached)."""
         rx, ry, ryaw = pose
@@ -442,6 +478,15 @@ class PathFollowerDynamic(Node):
         linear = min(linear, max_linear * (dist_to_goal / self._lookahead))
         linear = max(0.0, min(max_linear, linear))
 
+        # Slew-rate limit both axes so the commanded velocity can't jump
+        # further than max_linear_accel/decel and max_angular_accel allow
+        # within this cycle's dt, regardless of what the PID/curvature logic
+        # above asked for.
+        linear = self._slew_limit(
+            linear, self._current_speed, self._max_linear_accel, self._max_linear_decel, dt)
+        angular = self._slew_limit(
+            angular, self._current_angular, self._max_angular_accel, self._max_angular_accel, dt)
+
         cmd = TwistStamped()
         cmd.header.frame_id = "base_link"
         cmd.header.stamp = self.get_clock().now().to_msg()
@@ -451,10 +496,32 @@ class PathFollowerDynamic(Node):
 
     def _publish_cmd(self, cmd):
         self._current_speed = cmd.twist.linear.x
+        self._current_angular = cmd.twist.angular.z
         self._cmd_pub.publish(cmd)
 
     def _publish_stop(self):
-        self._publish_cmd(TwistStamped())
+        """Stop the robot.
+
+        By default publishes zero immediately, as befits a safety stop. If
+        ``safety_stop_respects_decel`` is set, instead blocks here ramping the
+        command down to zero at max_linear_decel/max_angular_accel -- same
+        limiter used for normal driving, just always targeting zero. Cheap to
+        call repeatedly: once already at zero it returns immediately.
+        """
+        if not self._safety_stop_respects_decel:
+            self._publish_cmd(TwistStamped())
+            return
+        period = 1.0 / self._control_hz
+        while abs(self._current_speed) > 1e-3 or abs(self._current_angular) > 1e-3:
+            cmd = TwistStamped()
+            cmd.header.frame_id = "base_link"
+            cmd.header.stamp = self.get_clock().now().to_msg()
+            cmd.twist.linear.x = self._slew_limit(
+                0.0, self._current_speed, self._max_linear_accel, self._max_linear_decel, period)
+            cmd.twist.angular.z = self._slew_limit(
+                0.0, self._current_angular, self._max_angular_accel, self._max_angular_accel, period)
+            self._publish_cmd(cmd)
+            time.sleep(period)
 
     def _publish_lookahead(self, frame_id, x, y):
         pose = PoseStamped()
