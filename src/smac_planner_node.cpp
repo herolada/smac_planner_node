@@ -93,6 +93,7 @@ public:
       std::bind(&SmacPlannerNode::traversabilityCallback, this, std::placeholders::_1));
 
     _plan_publisher = this->create_publisher<nav_msgs::msg::Path>("plan", 1);
+    _unsmoothed_plan_publisher = this->create_publisher<nav_msgs::msg::Path>("plan_unsmoothed", 1);
     _costmap_publisher = this->create_publisher<nav_msgs::msg::OccupancyGrid>(
       "costmap", rclcpp::QoS(1).transient_local());
 
@@ -320,6 +321,20 @@ private:
       RCLCPP_INFO(get_logger(), "Constructing and initializing the path smoother.");
       _smoother = std::make_unique<nav2_smac_planner::Smoother>(params);
       _smoother->initialize(_minimum_turning_radius_global_coords);
+
+      // nav2_smac_planner::Smoother indexes its costmap argument with points it doesn't
+      // bounds-check on failure (worldToMap() can return false while still leaving/setting
+      // mx/my outside the grid, which the smoother then reads via getCost() regardless --
+      // see createPlan()/padCostmapForSmoothing()). Its Dubins boundary-curve fitting can
+      // test points up to about one full turning-circle circumference away from the coarse
+      // path, so default the padding to that plus the robot radius; <0 falls back to it too.
+      double default_smoother_padding =
+        2.0 * M_PI * _minimum_turning_radius_global_coords + _robot_radius;
+      _smoother_costmap_padding =
+        declare_parameter<double>("smoother.costmap_padding", default_smoother_padding);
+      if (_smoother_costmap_padding < 0.0) {
+        _smoother_costmap_padding = default_smoother_padding;
+      }
     }
   }
 
@@ -658,6 +673,37 @@ private:
     goal_handle->succeed(result);
   }
 
+  // Returns a copy of `costmap` surrounded by an extra border of NO_INFORMATION cells,
+  // _smoother_costmap_padding metres wide, for _smoother->smooth() to run against instead
+  // of the original. nav2_smac_planner::Smoother calls Costmap2D::worldToMap() and uses
+  // its mx/my output regardless of whether the point was actually in bounds -- so smoothing
+  // directly against our tightly-cropped planning costmap (dynamically sized to the latest
+  // traversability cloud, not a padded global costmap) risks an out-of-bounds costmap read
+  // whenever a smoothed point drifts past the original edge. _smoother_costmap_padding is
+  // sized to keep every point Smoother evaluates inside this padded copy instead.
+  std::shared_ptr<nav2_costmap_2d::Costmap2D> padCostmapForSmoothing(
+    const nav2_costmap_2d::Costmap2D & costmap) const
+  {
+    const double res = costmap.getResolution();
+    const unsigned int pad_cells =
+      static_cast<unsigned int>(std::ceil(_smoother_costmap_padding / res)) + 1;
+
+    auto padded = std::make_shared<nav2_costmap_2d::Costmap2D>(
+      costmap.getSizeInCellsX() + 2 * pad_cells,
+      costmap.getSizeInCellsY() + 2 * pad_cells,
+      res,
+      costmap.getOriginX() - pad_cells * res,
+      costmap.getOriginY() - pad_cells * res,
+      nav2_costmap_2d::NO_INFORMATION);
+
+    for (unsigned int y = 0; y < costmap.getSizeInCellsY(); ++y) {
+      for (unsigned int x = 0; x < costmap.getSizeInCellsX(); ++x) {
+        padded->setCost(x + pad_cells, y + pad_cells, costmap.getCost(x, y));
+      }
+    }
+    return padded;
+  }
+
   // Clamps an out-of-bounds world point (wx, wy) to the nearest valid cell via
   // worldToMapEnforceBounds, and accepts it only if that cell's center is within
   // max_dist metres of the original point. On success, mx/my are set to the clamped cell.
@@ -798,6 +844,10 @@ private:
         plan.poses.push_back(pose);
       }
 
+      if (_unsmoothed_plan_publisher->get_subscription_count() > 0) {
+        _unsmoothed_plan_publisher->publish(plan);
+      }
+
       // Smooth, with whatever time is left.
       if (_smoother && num_iterations > 1) {
         const auto elapsed = std::chrono::duration<double>(
@@ -805,7 +855,8 @@ private:
         double time_remaining = _max_planning_time - elapsed;
         RCLCPP_INFO(
           get_logger(), "Smoothing the path with whatever planning time remains, which may be negative.");
-        _smoother->smooth(plan, costmap.get(), time_remaining);
+        auto smoothing_costmap = padCostmapForSmoothing(*costmap);
+        _smoother->smooth(plan, smoothing_costmap.get(), time_remaining);
       }
     } catch (const std::exception & ex) {
       RCLCPP_WARN(
@@ -881,6 +932,7 @@ private:
   // ROS interfaces
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr _traversability_sub;
   rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr _plan_publisher;
+  rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr _unsmoothed_plan_publisher;
   rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr _costmap_publisher;
   rclcpp_action::Server<ComputePathToPose>::SharedPtr _action_server;
   std::shared_ptr<tf2_ros::Buffer> _tf_buffer;
@@ -914,6 +966,7 @@ private:
   double _start_in_bounds_dist;
   double _goal_in_bounds_dist;
   double _robot_radius;
+  double _smoother_costmap_padding;
   float _tolerance;
   bool _allow_unknown;
   int _max_iterations;

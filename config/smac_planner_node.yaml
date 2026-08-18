@@ -61,3 +61,8 @@ smac_planner_node:
     smoother.w_smooth: 0.3
     smoother.do_refinement: true
     smoother.refinement_num: 2
+    # Metres of NO_INFORMATION border added around the costmap before smoothing, so a
+    # smoothed point drifting past the original edge stays in bounds instead of causing
+    # an out-of-bounds costmap read. <0 (or omitting this param) auto-computes it from
+    # minimum_turning_radius/robot_radius.
+    smoother.costmap_padding: -1.0
