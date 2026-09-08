@@ -45,6 +45,8 @@ from rclpy.duration import Duration
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 
+from rcl_interfaces.msg import FloatingPointRange, ParameterDescriptor, SetParametersResult
+
 import tf2_ros
 import tf2_geometry_msgs  # noqa: F401 - registers PoseStamped transform support on tf_buffer
 from geometry_msgs.msg import PoseStamped, TwistStamped
@@ -72,15 +74,30 @@ class InvalidPath(Exception):
     """The requested path is empty or otherwise unusable."""
 
 
+# Runtime-configurable parameters, and the value each one must stay within.
+_DYNAMIC_PARAM_RANGE = (0.1, 5.0)
+_DYNAMIC_PARAMS = ('lookahead_distance', 'max_linear_velocity', 'max_angular_velocity')
+
+
 class PathFollower(Node):
     def __init__(self):
         super().__init__('path_follower')
 
         # --- Parameters ---------------------------------------------------
         self._control_hz = self.declare_parameter('control_frequency', 20.0).value
-        self._lookahead = self.declare_parameter('lookahead_distance', 1.0).value
-        self._max_linear = self.declare_parameter('max_linear_velocity', 1.0).value
-        self._max_angular = self.declare_parameter('max_angular_velocity', 1.5).value
+        # lookahead_distance, max_linear_velocity and max_angular_velocity are
+        # runtime-configurable (see _on_parameter_change); the descriptor's range
+        # is just for introspection tools (e.g. rqt_reconfigure) - the range is
+        # actually enforced by hand in the callback.
+        dynamic_descriptor = ParameterDescriptor(
+            floating_point_range=[FloatingPointRange(
+                from_value=_DYNAMIC_PARAM_RANGE[0], to_value=_DYNAMIC_PARAM_RANGE[1])])
+        self._lookahead = self.declare_parameter(
+            'lookahead_distance', 1.0, dynamic_descriptor).value
+        self._max_linear = self.declare_parameter(
+            'max_linear_velocity', 1.0, dynamic_descriptor).value
+        self._max_angular = self.declare_parameter(
+            'max_angular_velocity', 1.5, dynamic_descriptor).value
         self._goal_tolerance = self.declare_parameter('goal_tolerance', 0.15).value
         # PID gains acting on the heading error to the lookahead point.
         self._kp = self.declare_parameter('kp', 1.5).value
@@ -116,6 +133,15 @@ class PathFollower(Node):
 
         self._cmd_pub = self.create_publisher(TwistStamped, self._cmd_topic, 1)
         self._lookahead_pub = self.create_publisher(PoseStamped, self._lookahead_topic, 1)
+
+        # Maps each dynamically-configurable parameter name to the instance
+        # attribute that mirrors it.
+        self._dynamic_param_attrs = {
+            'lookahead_distance': '_lookahead',
+            'max_linear_velocity': '_max_linear',
+            'max_angular_velocity': '_max_angular',
+        }
+        self.add_on_set_parameters_callback(self._on_parameter_change)
 
         if self._input_mode == 'topic':
             self._setup_topic_mode()
@@ -157,6 +183,32 @@ class PathFollower(Node):
             f"path_follower [action mode]: serving '{self._action_name}' -> "
             f"'{self._cmd_topic}' at {self._control_hz:.0f} Hz, "
             f"lookahead={self._lookahead:.2f} m, max_linear={self._max_linear:.2f} m/s.")
+
+    # -- dynamic parameters --------------------------------------------------
+    def _on_parameter_change(self, params):
+        """Validate and apply changes to the runtime-configurable parameters.
+
+        Rejects the whole batch if any of lookahead_distance, max_linear_velocity
+        or max_angular_velocity falls outside _DYNAMIC_PARAM_RANGE, and logs an
+        "old -> new" line for each one actually applied.
+        """
+        low, high = _DYNAMIC_PARAM_RANGE
+        for param in params:
+            if param.name in self._dynamic_param_attrs and not (low <= param.value <= high):
+                return SetParametersResult(
+                    successful=False,
+                    reason=(f"'{param.name}' must stay between {low} and {high} "
+                            f"(got {param.value})."))
+
+        for param in params:
+            attr = self._dynamic_param_attrs.get(param.name)
+            if attr is None:
+                continue
+            old_value = getattr(self, attr)
+            self.get_logger().info(f'{param.name}: {old_value} -> {param.value}')
+            setattr(self, attr, param.value)
+
+        return SetParametersResult(successful=True)
 
     # -- shared controller core -------------------------------------------
     def _reset_pid(self):

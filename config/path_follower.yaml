@@ -1,0 +1,31 @@
+path_follower:
+  ros__parameters:
+    # Input mode: 'topic' subscribes to plan_topic and free-runs at control_frequency;
+    # 'action' serves action_name as a nav2_msgs/FollowPath action server.
+    input_mode: "action"
+    plan_topic: "plan"
+    action_name: "follow_path"
+
+    # Frames
+    base_frame: "base_link"
+    # Fixed frame every incoming path is transformed into on arrival.
+    map_frame: "odom_odin"
+
+    # Topics
+    cmd_vel_topic: "cmd_vel"
+    lookahead_topic: "lookahead_pose"
+
+    control_frequency: 20.0
+    goal_tolerance: 0.15
+    # How long TF may fail continuously before a goal is aborted (action mode only).
+    tf_failure_timeout: 1.0
+
+    # Runtime-configurable (ros2 param set), must stay within [0.1, 5.0]:
+    lookahead_distance: 1.0
+    max_linear_velocity: 1.0
+    max_angular_velocity: 1.5
+
+    # PID gains acting on the heading error to the lookahead point.
+    kp: 1.5
+    ki: 0.0
+    kd: 0.1
