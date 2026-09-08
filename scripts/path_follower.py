@@ -304,6 +304,7 @@ class PathFollower(Node):
         if not msg.poses:
             self.get_logger().warning('Received empty path; stopping.')
             self._path = None
+            self._publish_stop()
             return
         try:
             self._path = self._transform_path(msg)
