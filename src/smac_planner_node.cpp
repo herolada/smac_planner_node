@@ -80,9 +80,7 @@ public:
   : rclcpp::Node("smac_planner_node", options),
     _collision_checker(nullptr, 1, nullptr)
   {
-    RCLCPP_INFO(get_logger(), "Declaring and parsing node parameters.");
     declareAndGetParameters();
-    RCLCPP_INFO(get_logger(), "Initializing the Hybrid-A* planner, collision checker, and smoother.");
     initializePlanner();
 
     _tf_buffer = std::make_shared<tf2_ros::Buffer>(this->get_clock());
@@ -92,10 +90,14 @@ public:
       _traversability_topic, rclcpp::SensorDataQoS(),
       std::bind(&SmacPlannerNode::traversabilityCallback, this, std::placeholders::_1));
 
-    _plan_publisher = this->create_publisher<nav_msgs::msg::Path>("plan", 1);
-    _unsmoothed_plan_publisher = this->create_publisher<nav_msgs::msg::Path>("plan_unsmoothed", 1);
+    _plan_publisher = this->create_publisher<nav_msgs::msg::Path>("~/plan", 1);
+    _unsmoothed_plan_publisher = this->create_publisher<nav_msgs::msg::Path>("~/plan_unsmoothed", 1);
     _costmap_publisher = this->create_publisher<nav_msgs::msg::OccupancyGrid>(
-      "costmap", rclcpp::QoS(1).transient_local());
+      "~/costmap", rclcpp::QoS(1).transient_local());
+    _planning_start_publisher = this->create_publisher<geometry_msgs::msg::PoseStamped>(
+      "~/planning_start", rclcpp::QoS(1).transient_local());
+    _planning_goal_publisher = this->create_publisher<geometry_msgs::msg::PoseStamped>(
+      "~/planning_goal", rclcpp::QoS(1).transient_local());
 
     _action_server = rclcpp_action::create_server<ComputePathToPose>(
       this, _action_name,
@@ -163,7 +165,6 @@ private:
 
     // General planner params (mirror SmacPlannerHybrid defaults)
     int angle_quantizations = declare_parameter<int>("angle_quantization_bins", 72);
-    RCLCPP_INFO(get_logger(), "Computing angle bin size; a zero angle_quantization_bins would divide by zero.");
     _angle_bin_size = 2.0 * M_PI / angle_quantizations;
     _angle_quantizations = static_cast<unsigned int>(angle_quantizations);
 
@@ -203,9 +204,6 @@ private:
 
     double analytic_expansion_max_length_m =
       declare_parameter<double>("analytic_expansion_max_length", 3.0);
-    RCLCPP_INFO(
-      get_logger(),
-      "Dividing analytic_expansion_max_length by resolution; a zero resolution would divide by zero.");
     _search_info.analytic_expansion_max_length =
       analytic_expansion_max_length_m / _costmap_resolution;
 
@@ -267,14 +265,9 @@ private:
 
   void initializePlanner()
   {
-    RCLCPP_INFO(
-      get_logger(),
-      "Computing minimum turning radius in map units; a zero resolution would divide by zero.");
     _search_info.minimum_turning_radius =
       static_cast<float>(_minimum_turning_radius_global_coords / _costmap_resolution);
 
-    RCLCPP_INFO(
-      get_logger(), "Computing the lookup table dimension; a zero resolution would divide by zero.");
     _lookup_table_dim =
       static_cast<float>(_lookup_table_size) / static_cast<float>(_costmap_resolution);
     _lookup_table_dim = static_cast<float>(static_cast<int>(_lookup_table_dim));
@@ -284,20 +277,15 @@ private:
 
     // Precompute the angle bins for the collision checker (irregular-bin constructor,
     // re-enabled in nav2_smac_planner just for this standalone use case).
-    RCLCPP_INFO(get_logger(), "Precomputing angle bins for the collision checker.");
     _angles.reserve(_angle_quantizations);
     for (unsigned int i = 0; i != _angle_quantizations; ++i) {
       _angles.push_back(static_cast<float>(_angle_bin_size) * i);
     }
-    RCLCPP_INFO(get_logger(), "Constructing the grid collision checker with the precomputed angle bins.");
     _collision_checker = nav2_smac_planner::GridCollisionChecker(nullptr, _angles);
 
-    RCLCPP_INFO(get_logger(), "Constructing the A* algorithm instance for the configured motion model.");
     _a_star =
       std::make_unique<nav2_smac_planner::AStarAlgorithm<nav2_smac_planner::NodeHybrid>>(
       _motion_model, _search_info);
-    RCLCPP_INFO(
-      get_logger(), "Initializing A* with the computed lookup table dimension and angle quantizations.");
     _a_star->initialize(
       _allow_unknown,
       _max_iterations,
@@ -318,7 +306,6 @@ private:
       params.do_refinement_ = declare_parameter<bool>("smoother.do_refinement", true);
       params.refinement_num_ = declare_parameter<int>("smoother.refinement_num", 2);
       params.holonomic_ = false;
-      RCLCPP_INFO(get_logger(), "Constructing and initializing the path smoother.");
       _smoother = std::make_unique<nav2_smac_planner::Smoother>(params);
       _smoother->initialize(_minimum_turning_radius_global_coords);
 
@@ -343,12 +330,10 @@ private:
   // ----------------------------------------------------------------------- //
   void traversabilityCallback(const sensor_msgs::msg::PointCloud2::SharedPtr msg)
   {
-    RCLCPP_INFO(get_logger(), "Building a costmap from the newly received traversability point cloud.");
     auto costmap = buildCostmap(*msg);
     if (!costmap) {
       return;
     }
-    RCLCPP_INFO(get_logger(), "Publishing the debug occupancy grid for the new costmap.");
     publishCostmap(*costmap, msg->header.frame_id);
     std::lock_guard<std::mutex> lock(_costmap_mutex);
     _costmap = std::move(costmap);
@@ -392,11 +377,9 @@ private:
     grid.info.origin.position.y = wy - costmap.getResolution() / 2.0;
     grid.info.origin.orientation.w = 1.0;
 
-    RCLCPP_INFO(get_logger(), "Allocating the occupancy grid data buffer for the costmap dimensions.");
     grid.data.resize(grid.info.width * grid.info.height);
     const unsigned char * data = costmap.getCharMap();
     const auto & table = costTranslationTable();
-    RCLCPP_INFO(get_logger(), "Copying the costmap char array into the occupancy grid buffer.");
     std::transform(
       data, data + grid.data.size(), grid.data.begin(),
       [&table](unsigned char c) {return table[c];});
@@ -423,7 +406,6 @@ private:
   std::shared_ptr<nav2_costmap_2d::Costmap2D> buildCostmap(
     const sensor_msgs::msg::PointCloud2 & cloud)
   {
-    RCLCPP_INFO(get_logger(), "Checking the traversability cloud for the required x/y/traversability fields.");
     bool has_x = false, has_y = false, has_t = false;
     for (const auto & f : cloud.fields) {
       has_x |= (f.name == "x");
@@ -448,11 +430,6 @@ private:
     const bool need_robot_pose = _trav_max_dist > 0.0 ||
       (_costmap_width > 0.0 && _costmap_height > 0.0);
     geometry_msgs::msg::PoseStamped robot_pose;
-    if (need_robot_pose) {
-      RCLCPP_INFO(
-        get_logger(),
-        "Looking up the robot pose to filter/bound the costmap; this can fail if TF is not available.");
-    }
     if (need_robot_pose && !getRobotPose(cloud.header.frame_id, robot_pose)) {
       RCLCPP_WARN_THROTTLE(
         get_logger(), *get_clock(), 5000,
@@ -464,9 +441,6 @@ private:
     const double robot_y = robot_pose.pose.position.y;
 
     // First pass: XY bounds of valid (and, if trav_max_dist > 0, in-range) points.
-    RCLCPP_INFO(
-      get_logger(),
-      "Constructing float point cloud iterators for x/y; this throws if those fields aren't float32.");
     sensor_msgs::PointCloud2ConstIterator<float> it_x(cloud, "x");
     sensor_msgs::PointCloud2ConstIterator<float> it_y(cloud, "y");
     double min_x = std::numeric_limits<double>::max();
@@ -516,9 +490,6 @@ private:
     max_y += _costmap_margin_y;
 
     const double res = _costmap_resolution;
-    RCLCPP_INFO(
-      get_logger(),
-      "Computing costmap dimensions from the point cloud bounds; a zero resolution would divide by zero.");
     const unsigned int size_x =
       static_cast<unsigned int>(std::lround((max_x - min_x) / res)) + 1u;
     const unsigned int size_y =
@@ -528,15 +499,10 @@ private:
     const double origin_x = min_x - 0.5 * res;
     const double origin_y = min_y - 0.5 * res;
 
-    RCLCPP_INFO(
-      get_logger(),
-      "Allocating the costmap grid; an excessively large size_x/size_y here could exhaust memory.");
     auto costmap = std::make_shared<nav2_costmap_2d::Costmap2D>(
       size_x, size_y, res, origin_x, origin_y, nav2_costmap_2d::NO_INFORMATION);
 
     // Second pass: stamp costs.
-    RCLCPP_INFO(
-      get_logger(), "Constructing float point cloud iterators for the second pass over x/y/traversability.");
     sensor_msgs::PointCloud2ConstIterator<float> px(cloud, "x");
     sensor_msgs::PointCloud2ConstIterator<float> py(cloud, "y");
     sensor_msgs::PointCloud2ConstIterator<float> pt(cloud, _traversability_field);
@@ -582,7 +548,6 @@ private:
   void handleAccepted(const std::shared_ptr<GoalHandle> goal_handle)
   {
     // Run planning off the executor thread; serialized via _planning_mutex.
-    RCLCPP_INFO(get_logger(), "Spawning a detached thread to execute planning for the accepted goal.");
     std::thread{std::bind(&SmacPlannerNode::execute, this, goal_handle)}.detach();
   }
 
@@ -590,7 +555,9 @@ private:
   {
     std::lock_guard<std::mutex> plan_lock(_planning_mutex);
     auto result = std::make_shared<ComputePathToPose::Result>();
-    const auto goal = goal_handle->get_goal();
+
+    auto goal = *goal_handle->get_goal();
+    goal.goal.header.stamp = this->now();
     const auto t0 = std::chrono::steady_clock::now();
 
     // Snapshot the latest costmap and its frame.
@@ -601,7 +568,6 @@ private:
       costmap = _costmap;
       global_frame = _global_frame;
     }
-    RCLCPP_INFO(get_logger(), "Checking that a costmap snapshot is available before planning.");
     if (!costmap) {
       result->error_code = ComputePathToPose::Result::UNKNOWN;
       result->error_msg = "No traversability map available";
@@ -612,37 +578,34 @@ private:
     // Resolve goal and start poses in the costmap (global) frame.
     geometry_msgs::msg::PoseStamped goal_pose;
     geometry_msgs::msg::PoseStamped start_pose;
-    RCLCPP_INFO(get_logger(), "Transforming the requested goal pose into the global frame via TF.");
-    if (!transformToGlobal(goal->goal, global_frame, goal_pose)) {
+    if (!transformToGlobal(goal.goal, global_frame, goal_pose)) {
       result->error_code = ComputePathToPose::Result::TF_ERROR;
       result->error_msg = "Could not transform goal into '" + global_frame + "'";
       goal_handle->abort(result);
       return;
     }
-    if (goal->use_start) {
-      RCLCPP_INFO(get_logger(), "Transforming the requested start pose into the global frame via TF.");
-      if (!transformToGlobal(goal->start, global_frame, start_pose)) {
+    if (goal.use_start) {
+      if (!transformToGlobal(goal.start, global_frame, start_pose)) {
         result->error_code = ComputePathToPose::Result::TF_ERROR;
         result->error_msg = "Could not transform start into '" + global_frame + "'";
         goal_handle->abort(result);
         return;
       }
-    } else {
-      RCLCPP_INFO(get_logger(), "Looking up the current robot pose via TF to use as the planning start.");
-      if (!getRobotPose(global_frame, start_pose)) {
-        result->error_code = ComputePathToPose::Result::TF_ERROR;
-        result->error_msg = "Could not look up robot pose in '" + global_frame + "'";
-        goal_handle->abort(result);
-        return;
-      }
+    } else if (!getRobotPose(global_frame, start_pose)) {
+      result->error_code = ComputePathToPose::Result::TF_ERROR;
+      result->error_msg = "Could not look up robot pose in '" + global_frame + "'";
+      goal_handle->abort(result);
+      return;
     }
+
+    _planning_start_publisher->publish(start_pose);
+    _planning_goal_publisher->publish(goal_pose);
 
     auto cancel_checker = [goal_handle]() {return goal_handle->is_canceling();};
 
     nav_msgs::msg::Path path;
     uint16_t error_code = ComputePathToPose::Result::NONE;
     std::string error_msg;
-    RCLCPP_INFO(get_logger(), "Running the Hybrid-A* search and smoothing to compute the plan.");
     const bool ok = createPlan(
       start_pose, goal_pose, costmap, global_frame, cancel_checker, path, error_code, error_msg);
 
@@ -663,9 +626,21 @@ private:
 
     result->path = path;
     const auto t1 = std::chrono::steady_clock::now();
-    result->planning_time =
-      rclcpp::Duration::from_seconds(std::chrono::duration<double>(t1 - t0).count());
+    const double planning_time_s = std::chrono::duration<double>(t1 - t0).count();
+    result->planning_time = rclcpp::Duration::from_seconds(planning_time_s);
     result->error_code = ComputePathToPose::Result::NONE;
+
+    if (!path.poses.empty()) {
+      const auto & reached = path.poses.back().pose.position;
+      const double goal_error = std::hypot(
+        reached.x - goal_pose.pose.position.x, reached.y - goal_pose.pose.position.y);
+      RCLCPP_INFO(
+        get_logger(), "Planning took %.4f s, goal distance error %.3f m.",
+        planning_time_s, goal_error);
+    } else {
+      RCLCPP_INFO(
+        get_logger(), "Planning took %.4f s, empty path (no goal reached).", planning_time_s);
+    }
 
     if (_plan_publisher->get_subscription_count() > 0) {
       _plan_publisher->publish(path);
@@ -738,11 +713,9 @@ private:
     std::string & error_msg)
   {
     _plan_start = std::chrono::steady_clock::now();
-    RCLCPP_INFO(get_logger(), "Locking the costmap mutex before reading it for planning.");
     std::unique_lock<nav2_costmap_2d::Costmap2D::mutex_t> lock(*(costmap->getMutex()));
 
     // Point the collision checker and A* at the current costmap.
-    RCLCPP_INFO(get_logger(), "Pointing the collision checker and A* at the snapshotted costmap.");
     _collision_checker.setCostmap(costmap.get());
     nav2_costmap_2d::Footprint footprint;  // unused for circular checking
     _collision_checker.setFootprint(
@@ -751,12 +724,9 @@ private:
 
     // Start, in A* bin search coordinates.
     float mx_start, my_start, mx_goal, my_goal;
-    RCLCPP_INFO(get_logger(), "Converting the start pose to map coordinates; it may fall outside the costmap.");
     if (!costmap->worldToMapContinuous(
         start.pose.position.x, start.pose.position.y, mx_start, my_start))
     {
-      RCLCPP_INFO(
-        get_logger(), "Start pose is out of bounds; attempting to clamp it within start_in_bounds_dist.");
       if (!enforceBoundsWithinTolerance(
           *costmap, start.pose.position.x, start.pose.position.y,
           _start_in_bounds_dist, mx_start, my_start))
@@ -770,12 +740,9 @@ private:
     _a_star->setStart(mx_start, my_start, start_bin);
 
     // Goal, in A* bin search coordinates.
-    RCLCPP_INFO(get_logger(), "Converting the goal pose to map coordinates; it may fall outside the costmap.");
     if (!costmap->worldToMapContinuous(
         goal.pose.position.x, goal.pose.position.y, mx_goal, my_goal))
     {
-      RCLCPP_INFO(
-        get_logger(), "Goal pose is out of bounds; attempting to clamp it within goal_in_bounds_dist.");
       if (!enforceBoundsWithinTolerance(
           *costmap, goal.pose.position.x, goal.pose.position.y,
           _goal_in_bounds_dist, mx_goal, my_goal))
@@ -786,7 +753,6 @@ private:
       }
     }
     unsigned int goal_bin = orientationToBin(tf2::getYaw(goal.pose.orientation));
-    RCLCPP_INFO(get_logger(), "Setting the A* goal state, including goal heading mode and coarse search resolution.");
     _a_star->setGoal(mx_goal, my_goal, goal_bin, _goal_heading_mode, _coarse_search_resolution);
 
     // Setup output message.
@@ -818,8 +784,6 @@ private:
       nav2_smac_planner::NodeHybrid::CoordinateVector path;
       int num_iterations = 0;
       const float tolerance = _tolerance / static_cast<float>(costmap->getResolution());
-      RCLCPP_INFO(
-        get_logger(), "Running A* createPath; this is the core search and the most likely place to throw.");
       if (!_a_star->createPath(path, num_iterations, tolerance, cancel_checker, nullptr)) {
         RCLCPP_INFO(get_logger(), "astar num_iterations %d", num_iterations);
         if (num_iterations == 1) {
@@ -836,7 +800,6 @@ private:
       }
 
       // Convert to world coordinates (backtrace yields goal-to-start order).
-      RCLCPP_INFO(get_logger(), "Converting the backtraced A* path into world coordinates.");
       plan.poses.reserve(path.size());
       for (int i = static_cast<int>(path.size()) - 1; i >= 0; --i) {
         pose.pose = nav2_smac_planner::getWorldCoords(path[i].x, path[i].y, costmap.get());
@@ -853,8 +816,6 @@ private:
         const auto elapsed = std::chrono::duration<double>(
           std::chrono::steady_clock::now() - _plan_start).count();
         double time_remaining = _max_planning_time - elapsed;
-        RCLCPP_INFO(
-          get_logger(), "Smoothing the path with whatever planning time remains, which may be negative.");
         auto smoothing_costmap = padCostmapForSmoothing(*costmap);
         _smoother->smooth(plan, smoothing_costmap.get(), time_remaining);
       }
@@ -894,7 +855,6 @@ private:
       out.header.frame_id = global_frame;
       return true;
     }
-    RCLCPP_INFO(get_logger(), "Requesting a TF transform of the given pose into the global frame.");
     try {
       out = _tf_buffer->transform(
         in, global_frame, tf2::durationFromSec(_transform_tolerance));
@@ -908,7 +868,6 @@ private:
   bool getRobotPose(const std::string & global_frame, geometry_msgs::msg::PoseStamped & pose)
   {
     geometry_msgs::msg::TransformStamped tf;
-    RCLCPP_INFO(get_logger(), "Looking up the TF transform from the global frame to the robot base frame.");
     try {
       tf = _tf_buffer->lookupTransform(
         global_frame, _robot_base_frame, tf2::TimePointZero,
@@ -934,6 +893,8 @@ private:
   rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr _plan_publisher;
   rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr _unsmoothed_plan_publisher;
   rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr _costmap_publisher;
+  rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr _planning_start_publisher;
+  rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr _planning_goal_publisher;
   rclcpp_action::Server<ComputePathToPose>::SharedPtr _action_server;
   std::shared_ptr<tf2_ros::Buffer> _tf_buffer;
   std::shared_ptr<tf2_ros::TransformListener> _tf_listener;
@@ -991,13 +952,9 @@ private:
 int main(int argc, char ** argv)
 {
   rclcpp::init(argc, argv);
-  RCLCPP_INFO(
-    rclcpp::get_logger("smac_planner_node"), "Constructing the node; malformed parameters could throw here.");
   auto node = std::make_shared<smac_planner_node::SmacPlannerNode>(rclcpp::NodeOptions());
   rclcpp::executors::MultiThreadedExecutor executor;
   executor.add_node(node);
-  RCLCPP_INFO(
-    node->get_logger(), "Spinning the executor; an uncaught exception in any callback would terminate the node.");
   executor.spin();
   rclcpp::shutdown();
   return 0;
