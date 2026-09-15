@@ -1,7 +1,5 @@
 smac_planner_node:
   ros__parameters:
-    use_sim_time: false
-
     # Interfaces / frames
     traversability_topic: "/terrain_map"
     action_name: "compute_path_to_pose"
@@ -10,8 +8,8 @@ smac_planner_node:
 
     # Costmap built from the traversability point cloud
     traversability_field: "traversability"   # PointCloud2 field name (float, 0..1)
-    resolution: 0.4                            # m/cell; must match the grid spacing
-    lethal_threshold: 0.7                     # traversability >= this -> lethal obstacle
+    resolution: 0.15                            # m/cell; must match the grid spacing
+    lethal_threshold: 0.9                     # traversability >= this -> lethal obstacle
 
     # Minimum robot-centered costmap rectangle (metres). The costmap is always sized
     # dynamically to enclose the incoming cloud's XY extent; if costmap_width/height are
@@ -24,36 +22,36 @@ smac_planner_node:
     trav_max_dist: 0.0                         # m; drop cloud points farther than this from the robot (<=0 disables), only use this if you need to ensure, that the incoming terrain_map is bounded
     
     # Collision checking (circular robot)
-    robot_radius: 1.5
+    robot_radius: 0.3
 
     # Hybrid-A* search (mirrors nav2_smac_planner SmacPlannerHybrid defaults)
-    tolerance: 1.0
+    tolerance: 2.0
     start_in_bounds_dist: 4.0
     goal_in_bounds_dist: 4.0
     allow_unknown: true
     max_iterations: 1000000
     max_on_approach_iterations: 1000
-    terminal_checking_interval: 1000
+    terminal_checking_interval: 5000
     smooth_path: true
     motion_model_for_search: "DUBIN"           # MOORE, VON_NEUMANN, DUBIN, REEDS_SHEPP
     angle_quantization_bins: 72
-    goal_heading_mode: "ALL_DIRECTION"               # DEFAULT, BIDIRECTIONAL, ALL_DIRECTION
+    goal_heading_mode: "DEFAULT"               # DEFAULT, BIDIRECTIONAL, ALL_DIRECTION
     coarse_search_resolution: 1
-    minimum_turning_radius: 2.0
-    reverse_penalty: 9999.0
+    minimum_turning_radius: 0.4
+    reverse_penalty: 2.0
     change_penalty: 0.0
     non_straight_penalty: 1.2
     cost_penalty: 2.0
     retrospective_penalty: 0.015
-    analytic_expansion_ratio: 2.0
-    analytic_expansion_max_length: 10.0 # 5 * min turning radius
+    analytic_expansion_ratio: 3.5
+    analytic_expansion_max_length: 3.0
     analytic_expansion_max_cost: 200.0
     analytic_expansion_max_cost_override: false
     use_quadratic_cost_penalty: false
     downsample_obstacle_heuristic: true
     allow_primitive_interpolation: false
     cache_obstacle_heuristic: false
-    max_planning_time: 0.1
+    max_planning_time: 5.0
     lookup_table_size: 20.0
 
     # Path smoother

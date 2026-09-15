@@ -35,7 +35,7 @@ class RvizGoalRelay(Node):
         super().__init__('rviz_goal_relay')
 
         # Match the C++ node's default action name (override if you remapped it).
-        self._action_name = self.declare_parameter('action_name', 'compute_path_to_pose').value
+        self._action_name = self.declare_parameter('action_name', 'hybrid/compute_path_to_pose').value
         self._goal_topic = self.declare_parameter('goal_topic', 'goal_pose').value
         # If True, plan from the robot's current pose; if False, plan from origin.
         self._use_start = self.declare_parameter('use_start', False).value

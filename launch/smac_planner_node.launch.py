@@ -27,5 +27,8 @@ def generate_launch_description():
             name='smac_planner_node',
             output='screen',
             parameters=[params_file],
+            remappings=[
+                ("compute_path_to_pose", "/hybrid/compute_path_to_pose"),
+            ]
         ),
     ])

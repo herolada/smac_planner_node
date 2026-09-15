@@ -30,6 +30,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -779,22 +780,47 @@ private:
     // in lethal cost or a mid-search cancellation, relying on the Nav2 planner server to
     // catch them. We have no such server, and this all runs on a detached std::thread, so
     // an uncaught exception here would call std::terminate() and kill the whole node.
-    // Catch it, log it, and just hand back an empty path instead.
+    // Catch it, map it to the closest matching error code, and report it as a failure
+    // (rather than the empty-path-but-"success" result this used to return, which hid
+    // failures like a goal in lethal cost -- areInputsValid() throws GoalOccupied for that
+    // before the search loop even starts).
     try {
       nav2_smac_planner::NodeHybrid::CoordinateVector path;
       int num_iterations = 0;
       const float tolerance = _tolerance / static_cast<float>(costmap->getResolution());
-      if (!_a_star->createPath(path, num_iterations, tolerance, cancel_checker, nullptr)) {
+      const auto astar_t0 = std::chrono::steady_clock::now();
+      const bool path_found = _a_star->createPath(
+        path, num_iterations, tolerance, cancel_checker, nullptr);
+      const double astar_time_s = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - astar_t0).count();
+      RCLCPP_INFO(
+        get_logger(), "AStar::createPath took %.4f s (%d iterations).",
+        astar_time_s, num_iterations);
+      if (!path_found) {
         RCLCPP_INFO(get_logger(), "astar num_iterations %d", num_iterations);
         if (num_iterations == 1) {
           error_code = ComputePathToPose::Result::START_OCCUPIED;
           error_msg = "Start occupied";
         } else if (num_iterations < _a_star->getMaxIterations()) {
           error_code = ComputePathToPose::Result::NO_VALID_PATH;
-          error_msg = "No valid path could be found";
+          std::ostringstream oss;
+          oss << "No valid path found: search exhausted all reachable states after "
+              << num_iterations << "/" << _a_star->getMaxIterations()
+              << " iterations, within tolerance " << _tolerance << " m.";
+          const float best_heuristic = _a_star->getBestHeuristicCost();
+          if (std::isfinite(best_heuristic)) {
+            oss << " Closest approach to goal (heuristic estimate, not path distance): ~"
+                << (best_heuristic * costmap->getResolution())
+                << " m -- if this is large, the goal is likely unreachable from the start"
+                << " (e.g. blocked/narrow approach or a costmap region disconnected from"
+                << " the goal); if small, the search likely just ran out of iterations/time"
+                << " close to the goal.";
+          }
+          error_msg = oss.str();
         } else {
           error_code = ComputePathToPose::Result::TIMEOUT;
-          error_msg = "Exceeded maximum iterations";
+          error_msg = "Exceeded maximum iterations (" +
+            std::to_string(_a_star->getMaxIterations()) + ")";
         }
         return false;
       }
@@ -819,12 +845,31 @@ private:
         auto smoothing_costmap = padCostmapForSmoothing(*costmap);
         _smoother->smooth(plan, smoothing_costmap.get(), time_remaining);
       }
+    } catch (const nav2_core::GoalOccupied & ex) {
+      error_code = ComputePathToPose::Result::GOAL_OCCUPIED;
+      error_msg = ex.what();
+      return false;
+    } catch (const nav2_core::StartOccupied & ex) {
+      error_code = ComputePathToPose::Result::START_OCCUPIED;
+      error_msg = ex.what();
+      return false;
+    } catch (const nav2_core::StartOutsideMapBounds & ex) {
+      error_code = ComputePathToPose::Result::START_OUTSIDE_MAP;
+      error_msg = ex.what();
+      return false;
+    } catch (const nav2_core::GoalOutsideMapBounds & ex) {
+      error_code = ComputePathToPose::Result::GOAL_OUTSIDE_MAP;
+      error_msg = ex.what();
+      return false;
+    } catch (const nav2_core::PlannerTimedOut & ex) {
+      error_code = ComputePathToPose::Result::TIMEOUT;
+      error_msg = ex.what();
+      return false;
     } catch (const std::exception & ex) {
-      RCLCPP_WARN(
-        get_logger(), "Planner threw an exception, returning an empty path: %s", ex.what());
-      plan.poses.clear();
-      error_code = ComputePathToPose::Result::NONE;
-      error_msg.clear();
+      RCLCPP_WARN(get_logger(), "Planner threw an exception: %s", ex.what());
+      error_code = ComputePathToPose::Result::UNKNOWN;
+      error_msg = ex.what();
+      return false;
     }
 
     return true;
