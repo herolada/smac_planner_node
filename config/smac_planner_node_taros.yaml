@@ -17,9 +17,9 @@ smac_planner_node:
     # dynamically to enclose the incoming cloud's XY extent; if costmap_width/height are
     # both > 0, the bounds are additionally expanded (never shrunk) to enclose this
     # rectangle, so the costmap never gets smaller than it even with a sparse/narrow cloud.
-    costmap_width: 12.0
-    costmap_height: 6.0
-    costmap_center_x: 5.4                      # offset ahead (+) of the robot, robot frame
+    costmap_width: 60.0
+    costmap_height: 60.0
+    costmap_center_x: 0.0                      # offset ahead (+) of the robot, robot frame
     costmap_center_y: 0.0                      # offset left (+) of the robot, robot frame
     trav_max_dist: 0.0                         # m; drop cloud points farther than this from the robot (<=0 disables), only use this if you need to ensure, that the incoming terrain_map is bounded
     
@@ -36,24 +36,24 @@ smac_planner_node:
     terminal_checking_interval: 1000
     smooth_path: true
     motion_model_for_search: "DUBIN"           # MOORE, VON_NEUMANN, DUBIN, REEDS_SHEPP
-    angle_quantization_bins: 72
+    angle_quantization_bins: 36
     goal_heading_mode: "ALL_DIRECTION"               # DEFAULT, BIDIRECTIONAL, ALL_DIRECTION
     coarse_search_resolution: 1
-    minimum_turning_radius: 2.0
+    minimum_turning_radius: 2.2
     reverse_penalty: 9999.0
     change_penalty: 0.0
     non_straight_penalty: 1.2
     cost_penalty: 2.0
     retrospective_penalty: 0.015
-    analytic_expansion_ratio: 2.0
-    analytic_expansion_max_length: 10.0 # 5 * min turning radius
+    analytic_expansion_ratio: 3.5
+    analytic_expansion_max_length: 11.0 # 5 * min turning radius
     analytic_expansion_max_cost: 200.0
     analytic_expansion_max_cost_override: false
     use_quadratic_cost_penalty: false
     downsample_obstacle_heuristic: true
     allow_primitive_interpolation: false
     cache_obstacle_heuristic: false
-    max_planning_time: 0.1
+    max_planning_time: 2.0
     lookup_table_size: 20.0
 
     # Path smoother
