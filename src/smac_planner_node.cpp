@@ -604,11 +604,18 @@ private:
 
     auto cancel_checker = [goal_handle]() {return goal_handle->is_canceling();};
 
+    // "respect_heading" in planner_id forces the exact goal orientation (DEFAULT),
+    // overriding the goal_heading_mode param for this request only.
+    const nav2_smac_planner::GoalHeadingMode goal_heading_mode =
+      goal.planner_id.find("respect_heading") != std::string::npos ?
+      nav2_smac_planner::GoalHeadingMode::DEFAULT : _goal_heading_mode;
+
     nav_msgs::msg::Path path;
     uint16_t error_code = ComputePathToPose::Result::NONE;
     std::string error_msg;
     const bool ok = createPlan(
-      start_pose, goal_pose, costmap, global_frame, cancel_checker, path, error_code, error_msg);
+      start_pose, goal_pose, costmap, global_frame, cancel_checker, path, error_code, error_msg,
+      goal_heading_mode);
 
     if (goal_handle->is_canceling()) {
       result->error_code = ComputePathToPose::Result::UNKNOWN;
@@ -711,7 +718,8 @@ private:
     std::function<bool()> cancel_checker,
     nav_msgs::msg::Path & plan,
     uint16_t & error_code,
-    std::string & error_msg)
+    std::string & error_msg,
+    const nav2_smac_planner::GoalHeadingMode & goal_heading_mode)
   {
     _plan_start = std::chrono::steady_clock::now();
     std::unique_lock<nav2_costmap_2d::Costmap2D::mutex_t> lock(*(costmap->getMutex()));
@@ -754,7 +762,7 @@ private:
       }
     }
     unsigned int goal_bin = orientationToBin(tf2::getYaw(goal.pose.orientation));
-    _a_star->setGoal(mx_goal, my_goal, goal_bin, _goal_heading_mode, _coarse_search_resolution);
+    _a_star->setGoal(mx_goal, my_goal, goal_bin, goal_heading_mode, _coarse_search_resolution);
 
     // Setup output message.
     plan.header.stamp = now();
