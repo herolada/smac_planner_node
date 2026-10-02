@@ -558,7 +558,11 @@ private:
     auto result = std::make_shared<ComputePathToPose::Result>();
 
     auto goal = *goal_handle->get_goal();
-    goal.goal.header.stamp = this->now();
+    
+    goal.goal.header.stamp = rclcpp::Time(0);
+    goal.goal.pose.position.z = 0.;
+    RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 5000, "Using latest timestamp and 'z'=0. for the goal pose.");
+
     const auto t0 = std::chrono::steady_clock::now();
 
     // Snapshot the latest costmap and its frame.
