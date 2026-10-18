@@ -11,7 +11,7 @@ smac_planner_node:
     # Costmap built from the traversability point cloud
     traversability_field: "traversability"   # PointCloud2 field name (float, 0..1)
     resolution: 0.4                            # m/cell; must match the grid spacing
-    lethal_threshold: 0.7                     # traversability >= this -> lethal obstacle
+    lethal_threshold: 0.8                     # traversability >= this -> lethal obstacle
 
     # Minimum robot-centered costmap rectangle (metres). The costmap is always sized
     # dynamically to enclose the incoming cloud's XY extent; if costmap_width/height are
@@ -27,9 +27,9 @@ smac_planner_node:
     robot_radius: 1.5
 
     # Hybrid-A* search (mirrors nav2_smac_planner SmacPlannerHybrid defaults)
-    tolerance: 1.0
-    start_in_bounds_dist: 4.0
-    goal_in_bounds_dist: 4.0
+    tolerance: 2.0
+    start_in_bounds_dist: 5.0
+    goal_in_bounds_dist: 5.0
     allow_unknown: true
     max_iterations: 1000000
     max_on_approach_iterations: 1000
